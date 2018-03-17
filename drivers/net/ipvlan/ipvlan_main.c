@@ -380,6 +380,20 @@ static int ipvlan_get_iflink(const struct net_device *dev)
 	return ipvlan->phy_dev->ifindex;
 }
 
+static int ipvlan_change_mtu(struct net_device *dev, int new_mtu)
+{
+	struct ipvl_dev *ipvlan = netdev_priv(dev);
+
+	if (ipvlan->phy_dev->mtu < new_mtu) {
+		netdev_err(ipvlan->dev, "new MTU %d exceeds MTU of %s (%d)",
+			   new_mtu, netdev_name(ipvlan->phy_dev),
+			   ipvlan->phy_dev->mtu);
+		return -EINVAL;
+	}
+	dev->mtu = new_mtu;
+	return 0;
+}
+
 static const struct net_device_ops ipvlan_netdev_ops = {
 	.ndo_init		= ipvlan_init,
 	.ndo_uninit		= ipvlan_uninit,
@@ -393,6 +407,7 @@ static const struct net_device_ops ipvlan_netdev_ops = {
 	.ndo_vlan_rx_add_vid	= ipvlan_vlan_rx_add_vid,
 	.ndo_vlan_rx_kill_vid	= ipvlan_vlan_rx_kill_vid,
 	.ndo_get_iflink		= ipvlan_get_iflink,
+	.ndo_change_mtu		= ipvlan_change_mtu,
 };
 
 static int ipvlan_hard_header(struct sk_buff *skb, struct net_device *dev,
@@ -584,7 +599,14 @@ int ipvlan_link_new(struct net *src_net, struct net_device *dev,
 	ipvlan->phy_dev = phy_dev;
 	ipvlan->dev = dev;
 	ipvlan->sfeatures = IPVLAN_FEATURES;
-	ipvlan_adjust_mtu(ipvlan, phy_dev);
+	if (!tb[IFLA_MTU]) {
+		ipvlan_adjust_mtu(ipvlan, phy_dev);
+	} else if (dev->mtu > phy_dev->mtu) {
+		netdev_err(ipvlan->dev, "initial MTU %d exceeds MTU of %s (%d)",
+			   dev->mtu, netdev_name(phy_dev), phy_dev->mtu);
+		return -EINVAL;
+	}
+
 	INIT_LIST_HEAD(&ipvlan->addrs);
 
 	/* TODO Probably put random address here to be presented to the
@@ -680,6 +702,8 @@ void ipvlan_link_setup(struct net_device *dev)
 {
 	ether_setup(dev);
 
+	dev->min_mtu = 0;
+	dev->max_mtu = ETH_MAX_MTU;
 	dev->priv_flags &= ~(IFF_XMIT_DST_RELEASE | IFF_TX_SKB_SHARING);
 	dev->priv_flags |= IFF_UNICAST_FLT | IFF_NO_QUEUE;
 	dev->netdev_ops = &ipvlan_netdev_ops;
@@ -775,8 +799,11 @@ static int ipvlan_device_event(struct notifier_block *unused,
 		break;
 
 	case NETDEV_CHANGEMTU:
-		list_for_each_entry(ipvlan, &port->ipvlans, pnode)
+		list_for_each_entry(ipvlan, &port->ipvlans, pnode) {
+			if (ipvlan->dev->mtu <= dev->mtu)
+				continue;
 			ipvlan_adjust_mtu(ipvlan, dev);
+		}
 		break;
 
 	case NETDEV_CHANGEADDR:
